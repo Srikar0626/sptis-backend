@@ -1,0 +1,14 @@
+{
+  "name": "sptis-backend",
+  "version": "1.0.0",
+  "description": "Live Simulation Engine",
+  "main": "simulation.js",
+  "scripts": {
+    "start": "node simulation.js"
+  },
+  "dependencies": {
+    "@supabase/supabase-js": "^2.38.0",
+    "dotenv": "^16.3.1",
+    "express": "^4.18.2"
+  }
+}
