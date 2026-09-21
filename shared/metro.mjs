@@ -181,38 +181,105 @@ export function nextRuns(fromId, toId, afterSec, { date = new Date(), limit = 3 
   return out;
 }
 
-/** Departure board: next trains from one station, any line/direction. */
+// --------------------------------------------------------- headway model
+// The published GTFS timetable only samples a couple thousand trips a day,
+// so asking "when is the next train" straight from it can land in a gap
+// between sampled trips and show a wait of an hour or more for two
+// stations that are five minutes apart. HMRL's advertised real-world
+// frequency is a train every ~5 minutes on every line, so that is what
+// drives "next train" and journey planning here instead. The GTFS data is
+// still used for the network topology (which lines connect where) and for
+// realistic station-to-station running times (see `hopSeconds` below).
+//
+// Service is modelled strictly morning to night — 06:00 to 23:00 — and we
+// never assume it wraps past midnight into the next day. If the time asked
+// for is outside that window, that simply means no train is available.
+export const METRO_SERVICE_START_SEC = 6 * 3600;  // 06:00 — first train
+export const METRO_SERVICE_END_SEC = 23 * 3600;   // 23:00 — last train
+export const METRO_HEADWAY_SEC = 5 * 60;          // a train every 5 minutes
+
+/**
+ * Next departure under the fixed headway model, or null if `afterSec` is
+ * at or past closing time. `offset` staggers the opposite direction so it
+ * doesn't show the exact same minute as the first direction checked.
+ */
+function nextHeadwayDeparture(afterSec, offset = 0) {
+  if (afterSec >= METRO_SERVICE_END_SEC) return null;
+  const earliest = Math.max(afterSec, METRO_SERVICE_START_SEC);
+  let dep = Math.ceil((earliest - offset) / METRO_HEADWAY_SEC) * METRO_HEADWAY_SEC + offset;
+  if (dep < earliest) dep += METRO_HEADWAY_SEC;
+  return dep < METRO_SERVICE_END_SEC ? dep : null;
+}
+
+/** Real running time for a ride leg, station by station, from the GTFS-derived hop table. */
+function hopSeconds(lineId, stations) {
+  let sec = 0;
+  for (let i = 0; i + 1 < stations.length; i++) {
+    const key = `${lineId}|${stations[i]}|${stations[i + 1]}`;
+    sec += cache?.hop[key] ?? 90; // ~90s/station if a hop is missing from the feed
+  }
+  return sec;
+}
+
+/** Name of the end of the line in the direction this leg is travelling. */
+function terminusForLeg(lineId, stations) {
+  const line = cache?.lineById[lineId];
+  if (!line || !line.stations.length) return '';
+  const seq = line.stations;
+  const iFrom = seq.indexOf(stations[0]);
+  const iTo = seq.indexOf(stations[stations.length - 1]);
+  if (iFrom === -1 || iTo === -1) return cache.stationById[seq[seq.length - 1]]?.name || '';
+  const forward = iTo > iFrom;
+  return cache.stationById[forward ? seq[seq.length - 1] : seq[0]]?.name || '';
+}
+
+/** Departure board: next trains from one station, any line/direction, every ~5 minutes. */
 export function nextTrains(stationId, { after = null, date = new Date(), limit = 6 } = {}) {
   if (!cache) return [];
   const afterSec = after ?? secondsSinceMidnight(date);
-  const svc = serviceIdForDate(date);
+  const station = cache.stationById[stationId];
+  if (!station) return [];
   const out = [];
-  for (const [profIdx, start] of cache.trips[svc] || []) {
-    const prof = cache.profiles[profIdx];
-    const pat = cache.patterns[prof.p];
-    const i = pat.pos[stationId];
-    if (i === undefined || i === pat.stations.length - 1) continue;
-    const dep = start + prof.dep[i];
-    if (dep < afterSec) continue;
-    out.push({ line: pat.line, dir: pat.dir, depSec: dep, inMin: Math.round((dep - afterSec) / 60), terminus: pat.terminus });
-    if (out.length >= limit) break;
-  }
-  return out.sort((a, b) => a.depSec - b.depSec);
+  (station.lines || []).forEach((lineId) => {
+    const line = cache.lineById[lineId];
+    if (!line) return;
+    const idx = line.stations.indexOf(stationId);
+    if (idx === -1) return;
+    if (idx < line.stations.length - 1) {
+      const dep = nextHeadwayDeparture(afterSec);
+      if (dep !== null) {
+        out.push({ line: lineId, dir: 0, depSec: dep, inMin: Math.max(0, Math.round((dep - afterSec) / 60)), terminus: cache.stationById[line.stations[line.stations.length - 1]]?.name || '' });
+      }
+    }
+    if (idx > 0) {
+      const dep = nextHeadwayDeparture(afterSec, METRO_HEADWAY_SEC / 2);
+      if (dep !== null) {
+        out.push({ line: lineId, dir: 1, depSec: dep, inMin: Math.max(0, Math.round((dep - afterSec) / 60)), terminus: cache.stationById[line.stations[0]]?.name || '' });
+      }
+    }
+  });
+  return out.sort((a, b) => a.depSec - b.depSec).slice(0, limit);
 }
 
-/** First and last train of the day from a station. */
-export function firstLastTrain(stationId, date = new Date()) {
+/** First and last train of the day from a station (fixed by the 06:00–23:00 service window). */
+export function firstLastTrain(stationId) {
   if (!cache) return null;
-  const all = nextTrains(stationId, { after: 0, date, limit: 9999 });
-  if (!all.length) return null;
-  const byLine = {};
-  all.forEach((t) => {
-    const k = `${t.line}|${t.terminus}`;
-    if (!byLine[k]) byLine[k] = { line: t.line, terminus: t.terminus, first: t.depSec, last: t.depSec };
-    byLine[k].last = Math.max(byLine[k].last, t.depSec);
-    byLine[k].first = Math.min(byLine[k].first, t.depSec);
+  const station = cache.stationById[stationId];
+  if (!station) return null;
+  const out = [];
+  (station.lines || []).forEach((lineId) => {
+    const line = cache.lineById[lineId];
+    if (!line) return;
+    const idx = line.stations.indexOf(stationId);
+    if (idx === -1) return;
+    if (idx < line.stations.length - 1) {
+      out.push({ line: lineId, terminus: cache.stationById[line.stations[line.stations.length - 1]]?.name || '', first: METRO_SERVICE_START_SEC, last: METRO_SERVICE_END_SEC });
+    }
+    if (idx > 0) {
+      out.push({ line: lineId, terminus: cache.stationById[line.stations[0]]?.name || '', first: METRO_SERVICE_START_SEC, last: METRO_SERVICE_END_SEC });
+    }
   });
-  return Object.values(byLine);
+  return out.length ? out : null;
 }
 
 // --------------------------------------------------------- crowd estimate
@@ -304,10 +371,13 @@ export function metroPath(fromId, toId) {
 }
 
 /**
- * Full metro journey with real departure times.
+ * Full metro journey using the fixed 5-minute headway model (see above)
+ * for waits, and real GTFS-derived running times for the ride itself.
  * Returns { legs, depSec, arrSec, durationSec, fare, transfers } or null.
+ * Returns null if a leg would depart outside the 06:00–23:00 service
+ * window — no train, and no overnight service is assumed.
  */
-export function planMetro(fromId, toId, departSec, { date = new Date(), smartCard = false } = {}) {
+export function planMetro(fromId, toId, departSec, { smartCard = false } = {}) {
   const skeleton = metroPath(fromId, toId);
   if (!skeleton) return null;
 
@@ -319,22 +389,24 @@ export function planMetro(fromId, toId, departSec, { date = new Date(), smartCar
       t += leg.sec;
       continue;
     }
-    const run = nextRuns(leg.from, leg.to, t, { date, limit: 1 })[0];
-    if (!run) return null; // no train left today
+    const dep = nextHeadwayDeparture(t);
+    if (dep === null) return null; // outside 06:00–23:00 service, no train
+    const rideSec = hopSeconds(leg.line, leg.stations);
+    const arr = dep + rideSec;
     legs.push({
       kind: 'metro',
-      line: run.line,
+      line: leg.line,
       from: leg.from,
       to: leg.to,
       stations: leg.stations,
       stops: leg.stations.length - 1,
-      terminus: run.terminus,
-      depSec: run.depSec,
-      arrSec: run.arrSec,
-      waitSec: run.depSec - t,
-      crowd: metroCrowdEstimate(run.depSec)
+      terminus: terminusForLeg(leg.line, leg.stations),
+      depSec: dep,
+      arrSec: arr,
+      waitSec: dep - t,
+      crowd: metroCrowdEstimate(dep)
     });
-    t = run.arrSec;
+    t = arr;
   }
 
   const rides = legs.filter((l) => l.kind === 'metro');
