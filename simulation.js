@@ -1,6 +1,7 @@
 require('dotenv').config();
 const { createClient } = require('@supabase/supabase-js');
 const express = require('express');
+const cors = require('cors');
 
 // ---------------------------------------------------------------
 // SETTINGS
@@ -36,6 +37,20 @@ let tickInProgress = false;
 // ---------------------------------------------------------------
 const app = express();
 const port = process.env.PORT || 3000;
+
+// The website (Vercel) calls this server, so it needs CORS and a JSON body
+// parser. ALLOWED_ORIGIN should be set to https://sptis.vercel.app in Render.
+app.use(cors({ origin: process.env.ALLOWED_ORIGIN || '*' }));
+app.use(express.json());
+
+// AI assistant: POST /api/chat. Loaded inside a try so that a missing
+// ANTHROPIC_API_KEY or a missing package can never stop the simulation engine.
+try {
+  app.use('/api', require('./routes/chat'));
+  console.log('\u{1F916} Chat API mounted at /api/chat');
+} catch (err) {
+  console.error('\u26A0\uFE0F Chat API not mounted:', err.message);
+}
 
 app.get('/', (req, res) => {
   res.send('✅ SPTIS Live Simulation Engine is Running 24/7!');

@@ -1,13 +1,16 @@
 {
   "name": "sptis-backend",
-  "version": "1.0.0",
-  "description": "Live Simulation Engine",
+  "version": "1.1.0",
+  "description": "Live Simulation Engine + Metro data + AI assistant API",
   "main": "simulation.js",
   "scripts": {
-    "start": "node simulation.js"
+    "start": "node simulation.js",
+    "build:metro": "node scripts/buildMetroData.js ./gtfs ./data/metro.json"
   },
   "dependencies": {
+    "@anthropic-ai/sdk": "^0.127.0",
     "@supabase/supabase-js": "^2.38.0",
+    "cors": "^2.8.6",
     "dotenv": "^16.3.1",
     "express": "^4.18.2"
   }
